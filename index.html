@@ -193,6 +193,7 @@ button { font: inherit; color: inherit; }
 
 /* 마이크: 목소리가 클수록 커진다 */
 .mic-wrap { transform: scale(calc(1 + var(--lv, 0) * .45)); transition: transform .08s linear; }
+.mic-wrap.pop { animation-fill-mode: backwards; }
 .mic {
   width: calc(180 * var(--u));
   height: calc(180 * var(--u));
@@ -427,8 +428,8 @@ button { font: inherit; color: inherit; }
   border-radius: 999px;
   transition: opacity .5s;
 }
-.dock.idle { opacity: 0; }
-.dock.idle:hover, .dock:focus-within { opacity: 1; }
+.dock.idle { opacity: 0; pointer-events: none; }
+.dock:has(:focus-visible) { opacity: 1; pointer-events: auto; }
 .dock button {
   display: inline-flex;
   align-items: center;
@@ -460,7 +461,7 @@ button { font: inherit; color: inherit; }
 }
 .mic-state i { width: calc(14 * var(--u)); height: calc(14 * var(--u)); border-radius: 50%; background: #9AA7AA; }
 .mic-state[data-s="on"] i { background: #1FCB7A; box-shadow: 0 0 8px #1FCB7A; }
-.mic-state[data-s="asking"] i { background: #FFC23D; }
+.mic-state[data-s="asking"] i, .mic-state[data-s="busy"] i { background: #FFC23D; }
 .mic-state[data-s="denied"] i, .mic-state[data-s="none"] i { background: var(--neon-red); }
 .toast {
   position: fixed;
@@ -576,6 +577,18 @@ const CONFIG = {
 
 const $ = (s) => document.querySelector(s);
 const TAU = Math.PI * 2;
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  // 오래된 브라우저용: 숫자 반지름 하나만 쓰는 roundRect
+  CanvasRenderingContext2D.prototype.roundRect = function roundRect(x, y, w, h, r = 0) {
+    const rr = Math.max(0, Math.min(Number(r) || 0, Math.abs(w) / 2, Math.abs(h) / 2));
+    this.moveTo(x + rr, y);
+    this.arcTo(x + w, y, x + w, y + h, rr);
+    this.arcTo(x + w, y + h, x, y + h, rr);
+    this.arcTo(x, y + h, x, y, rr);
+    this.arcTo(x, y, x + w, y, rr);
+    this.closePath();
+  };
+}
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
 const lerp = (a, b, t) => a + (b - a) * t;
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -2162,6 +2175,7 @@ function hiss({ at = 0, a = 0.01, d = 0.3, gain = 0.2, type = 'bandpass', f = 10
   const t = c.currentTime + at;
   const s = c.createBufferSource();
   s.buffer = audio.noise;
+  s.loop = true;
   const fl = c.createBiquadFilter();
   fl.type = type;
   fl.frequency.setValueAtTime(f, t);
@@ -2223,7 +2237,7 @@ const sfx = {
 // =====================================================================
 const mic = { state: 'off', stream: null, an: null, freq: null, timeF: null };
 const voice = { level: 0 };
-const MIC_TEXT = { off: '마이크 꺼짐', asking: '마이크 연결 중', on: '마이크 켜짐', denied: '마이크 권한 없음', none: '마이크 없음' };
+const MIC_TEXT = { off: '마이크 꺼짐', asking: '마이크 연결 중', on: '마이크 켜짐', denied: '마이크 권한 없음', none: '마이크 없음', busy: '마이크 사용 중' };
 const micStateEl = $('#micState');
 function updateMicUI() {
   micStateEl.dataset.s = mic.state;
@@ -2255,7 +2269,8 @@ function ensureMic() {
       return true;
     })
     .catch((err) => {
-      mic.state = err && err.name === 'NotFoundError' ? 'none' : 'denied';
+      const name = err && err.name;
+      mic.state = name === 'NotFoundError' ? 'none' : name === 'NotReadableError' || name === 'AbortError' ? 'busy' : 'denied';
       return false;
     })
     .finally(() => { micPending = null; updateMicUI(); });
@@ -2290,6 +2305,7 @@ function recStart() {
     r.onstart = () => { rec.running = true; };
     r.onresult = onRecResult;
     r.onerror = (e) => {
+      if (e.error !== 'no-speech' && e.error !== 'aborted') rec.fails++;
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         rec.want = false;
         toast('음성 인식 권한이 없어요. ▶로 정답 화면을 열 수 있어요.');
@@ -2297,7 +2313,6 @@ function recStart() {
         rec.want = false;
         toast('마이크를 찾지 못했어요. ▶로 정답 화면을 열 수 있어요.');
       } else if (e.error === 'network') {
-        rec.fails++;
         toast('음성 인식에는 인터넷 연결이 필요해요.');
       }
     };
@@ -2316,11 +2331,11 @@ function recTry() {
 }
 function recStop() {
   rec.want = false;
-  if (rec.inst && rec.running) {
-    try { rec.inst.abort(); } catch { /* 무시 */ }
-  }
+  // 시작 직후(onstart 전)에 단계를 떠나도 확실히 멈추도록 늘 abort한다
+  try { rec.inst?.abort(); } catch { /* 무시 */ }
 }
 function onRecResult(e) {
+  rec.fails = 0;
   if (step !== 3 || answered) return;
   for (let i = e.resultIndex; i < e.results.length; i++) {
     const res = e.results[i];
@@ -3002,7 +3017,16 @@ function answer(source) {
   if (source === 'voice') after(0.9, () => goStep(4));
   else goStep(4);
 }
+let lastNav = -1e9;
+function navLocked() {
+  // 두 번 빠르게 눌러도(더블클릭, 리모컨 연타) 한 단계만 넘어간다
+  const t = performance.now();
+  if (t - lastNav < 500) return true;
+  lastNav = t;
+  return false;
+}
 function next() {
+  if (navLocked()) return;
   initAudio();
   if (step === 0) startShow();
   else if (step === 3) answer('presenter');
@@ -3010,6 +3034,7 @@ function next() {
   else goStep(step + 1);
 }
 function prev() {
+  if (navLocked()) return;
   if (step <= 1) toIntro();
   else goStep(step - 1);
 }
@@ -3075,6 +3100,7 @@ function pokeDock() {
   dockTimer = setTimeout(() => { if (!introShown) dock.classList.add('idle'); }, 2600);
 }
 window.addEventListener('pointermove', pokeDock, { passive: true });
+window.addEventListener('pointerdown', pokeDock, { passive: true });
 window.addEventListener('keydown', (e) => {
   if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
   const c = e.code;
@@ -3094,9 +3120,11 @@ window.addEventListener('keydown', (e) => {
 $('#stage').addEventListener('click', () => { if (!introShown) next(); });
 $('#panel').addEventListener('click', () => { if (!introShown) next(); });
 dock.addEventListener('click', (e) => {
-  const act = e.target.closest('button')?.dataset.act;
+  const btn = e.target.closest('button');
+  const act = btn?.dataset.act;
   if (!act) return;
   e.stopPropagation();
+  if (e.detail > 0) btn.blur();
   initAudio();
   if (act === 'next') next();
   else if (act === 'prev') { if (!introShown) prev(); }
@@ -3109,6 +3137,7 @@ const micMeter = $('#micMeter');
 const micMeterFill = micMeter.firstElementChild;
 function micHelp() {
   if (mic.state === 'none') return '연결된 마이크를 찾지 못했어요. 마이크를 꽂고 다시 눌러 주세요.';
+  if (mic.state === 'busy') return '다른 프로그램(줌, OBS 등)이 마이크를 쓰고 있어요. 그 프로그램을 끄고 다시 눌러 주세요.';
   if (location.protocol === 'file:') return '마이크가 막혀 있어요. 파일을 직접 열기보다 인터넷 주소(https)로 열면 잘 돼요.';
   return '마이크가 막혀 있어요. 주소창 왼쪽 자물쇠 아이콘에서 마이크를 허용해 주세요.';
 }
@@ -3120,7 +3149,7 @@ $('#btnMicTest').addEventListener('click', async () => {
     ? `마이크가 연결됐어요. 소리를 내면 막대가 움직여요.${SR ? '' : ' (이 브라우저는 음성 인식이 안 돼요. 크롬을 권장해요.)'}`
     : micHelp();
 });
-btnStart.addEventListener('click', () => { if (!btnStart.disabled) startShow(); });
+btnStart.addEventListener('click', () => { if (!btnStart.disabled && !navLocked()) startShow(); });
 
 // =====================================================================
 // 크기 맞춤과 매 프레임 그리기
@@ -3203,16 +3232,20 @@ function render() {
   }
   g.setTransform(1, 0, 0, 1, 0, 0);
 }
-const perf = { acc: 0, frames: 0 };
+const perf = { acc: 0, frames: 0, best: Infinity };
 function watchPerf(dt) {
   if (document.hidden) return;
   perf.acc += dt;
   perf.frames++;
   if (perf.acc > 2) {
-    // 느린 컴퓨터에서는 해상도를 조금 낮춰 부드럽게 돌린다
-    if (perf.acc / perf.frames > 1 / 40 && view.budget > 1.4e6) {
+    // 느린 컴퓨터에서는 해상도를 조금 낮춰 부드럽게 돌린다.
+    // 30Hz 화면처럼 원래 느린 출력은 건드리지 않도록, 지금까지 가장 좋았던 간격의 1.5배를 넘을 때만 낮춘다.
+    const avg = perf.acc / perf.frames;
+    perf.best = Math.min(perf.best, avg);
+    if (avg > Math.max(1 / 40, perf.best * 1.5) && view.budget > 1.4e6) {
       view.budget *= 0.7;
-      resize();
+      layout();
+      placeMoses();
     }
     perf.acc = 0;
     perf.frames = 0;
