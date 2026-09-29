@@ -94,7 +94,10 @@ button { font: inherit; color: inherit; }
   height: 100%;
   padding: calc(30 * var(--u)) calc(30 * var(--u)) calc(30 * var(--u)) 0;
   cursor: pointer;
+  transition: opacity .6s ease, visibility .6s;
 }
+/* 시작 화면에는 설정판이 따로 있으니 뒤쪽 빈 안내판은 숨긴다 */
+body.intro-on #panel { opacity: 0; visibility: hidden; }
 .glass {
   background: linear-gradient(140deg, var(--glass-top), var(--glass-bottom));
   border: 1px solid var(--glass-edge);
@@ -579,7 +582,7 @@ html[lang="zh"] .line, html[lang="ja"] .line { word-break: normal; line-break: s
 }
 </style>
 </head>
-<body>
+<body class="intro-on">
 <main id="app">
   <canvas id="scene" aria-label="성경 인물이 나오는 그림 무대"></canvas>
   <section id="stage" aria-hidden="true">
@@ -3989,6 +3992,7 @@ let introEverLeft = false;
 function showIntro() {
   introShown = true;
   introEl.classList.remove('gone');
+  document.body.classList.add('intro-on');
   btnStart.textContent = T().restart;
   dock.classList.remove('idle');
   renderSetup();
@@ -3998,6 +4002,7 @@ function hideIntro() {
   introShown = false;
   introEverLeft = true;
   introEl.classList.add('gone');
+  document.body.classList.remove('intro-on');
   pokeDock();
 }
 
